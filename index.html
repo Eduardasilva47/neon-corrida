@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+  <title>HeartRunner – by Eduarda Silva Games</title>
+
+  <style>
+    :root{
+      --fundo:#07080f; --rosa:#ff3b81; --azul:#00e5ff; --texto:#e9f1ff;
+    }
+    html,body{
+      margin:0;height:100%;background:var(--fundo);color:var(--texto);
+      font-family:system-ui,Segoe UI,Roboto,Arial;
+      overscroll-behavior:none; touch-action:none;
+    }
+    canvas{display:block;width:100vw;height:100vh; touch-action:none;}
+    .hud{position:fixed;left:10px;top:10px;font-weight:800;text-shadow:0 0 6px rgba(255,255,255,.25);z-index:2}
+    .brand{position:fixed;right:12px;bottom:8px;font-size:12px;opacity:.8;z-index:2}
+    .center{position:fixed;inset:0;display:grid;place-items:center;text-align:center;padding:24px;pointer-events:none;z-index:2}
+    .btn{display:inline-block;margin-top:12px;padding:10px 16px;border-radius:12px;border:1px solid var(--azul);box-shadow:0 0 10px var(--azul);color:var(--texto);text-decoration:none;font-weight:800;pointer-events:auto}
+    .small{font-size:12px;opacity:.85;margin-top:6px}
+
+    /* Botões touch */
+    .touch-zone{position:fixed;bottom:12px;z-index:3;display:flex;gap:8px}
+    .touch-left{left:12px}
+    .touch-right{left:92px}
+    .touch-jump{right:12px}
+    .touch-btn{
+      min-width:56px; min-height:56px; border-radius:14px; border:1px solid var(--azul);
+      box-shadow:0 0 10px var(--azul); background:rgba(10,16,28,.35); color:var(--texto);
+      font-weight:900; font-size:20px; display:grid; place-items:center;
+      -webkit-user-select:none; user-select:none; touch-action:manipulation;
+    }
+    @media (min-width: 900px){ .touch-zone{display:none;} } /* esconde no desktop */
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div class="hud" id="hud"></div>
+  <div class="brand">Eduarda Silva Games • HeartRunner</div>
+  <div class="center" id="overlay"></div>
+
+  <!-- Controles de toque -->
+  <div class="touch-zone touch-left"><div id="btnLeft"  class="touch-btn">←</div></div>
+  <div class="touch-zone touch-right"><div id="btnRight" class="touch-btn">→</div></div>
+  <div class="touch-zone touch-jump"><div id="btnJump"  class="touch-btn">⤒</div></div>
+
+  <!-- Destravador de áudio mobile (iOS/Android) -->
+  <audio id="bgm" src="audio/rock.mp3." preload="auto" playsinline></audio>
+
+<script>
+(() => {
+/* ================= ÁUDIO ================= */
+// Música principal
+const musica = new Audio("audio/rock.mp3");
+musica.preload = "auto";
+musica.loop = true;
+musica.volume = 0.6;
+
+// SFX opcionais (se faltar arquivo, o jogo ignora)
+let sPulo, sHeart;
+try { sPulo  = new Audio("jump.mp3");  sPulo.volume  = 0.8; } catch(_){}
+try { sHeart = new Audio("heart.mp3"); sHeart.volume = 0.8; } catch(_){}
+
+// Botão 🔊/🔇
+const muteBtn = document.createElement('button');
+muteBtn.id = 'muteBtn';
+muteBtn.textContent = '🔊 Ativar música';
+muteBtn.style.cssText = `
+  position:fixed; right:12px; top:10px; z-index:3;
+  background:transparent; color:#e9f1ff; border:1px solid #00e5ff;
+  box-shadow:0 0 10px #00e5ff; border-radius:10px; padding:6px 10px; font-weight:800;
+`;
+document.body.appendChild(muteBtn);
+
+const bgmEl = document.getElementById('bgm');
+let audioReady = false, muted=false;
+
+async function unlockAudio(){
+  try{
+    await bgmEl.play().catch(()=>{});
+    await musica.play().catch(()=>{});
+    if (!musica.paused) {
+      audioReady = true;
+      musica.loop = true;
+      bgmEl.pause(); // não tocar os dois
+      muteBtn.textContent = '🔇';
+    } else {
+      muteBtn.textContent = '🔊 Ativar música';
+    }
+  }catch(_){}
+}
+muteBtn.addEventListener('click', async ()=>{
+  if(!audioReady){ await unlockAudio(); return; }
+  muted = !muted; musica.muted = muted;
+  muteBtn.textContent = muted ? '🔊' : '🔇';
+});
+
+// Primeiro gesto do usuário (mobile)
+const firstGesture = async (e) => {
+  e && e.preventDefault && e.preventDefault();
+  await unlockAudio();
+  window.removeEventListener('pointerdown', firstGesture);
+  window.removeEventListener('touchstart',  firstGesture);
+  window.removeEventListener('keydown',     firstGesture);
+};
+window.addEventListener('pointerdown', firstGesture, { once:true, passive:false });
+window.addEventListener('touchstart',  firstGesture, { once:true, passive:false });
+window.addEventListener('keydown',     firstGesture, { once:true });
+musica.addEventListener('error',()=>{ muteBtn.textContent='⚠️ rock.mp3 não encontrado'; });
+
+/* ================ CONFIG & ESTADO ================ */
+const TARGET_HEARTS = 20;
+const GRAVITY = 0.7;
+const JUMP_VY = -17;
+const GROUND_FRAC = 0.82;
+const BASE_SPEED = 6;
+const HEART_RATE = 60;
+const OBST_RATE = 85;
+const RAIN = 130;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const hud = document.getElementById('hud');
+const overlay = document.getElementById('overlay');
+
+let W=1280,H=720,groundY=0;
+function resize(){
+  const vw=innerWidth,vh=innerHeight, target=16/9, cur=vw/vh;
+  if(cur>target){H=vh;W=Math.floor(vh*target);}else{W=vw;H=Math.floor(vw/target);}
+  canvas.width=W; canvas.height=H; groundY=Math.floor(H*GROUND_FRAC);
+}
+addEventListener('resize',resize); resize();
+
+const rain=[]; for(let i=0;i<RAIN;i++) rain.push({x:Math.random()*W,y:Math.random()*H,v:8+Math.random()*6,len:8+Math.random()*12});
+
+const player={x:200,y:0,vy:0,w:28,h:48,onGround:false};
+const hearts=[], obst=[], parts=[];
+let frames=0, collected=0, best=Number(localStorage.getItem('hr_best')||0);
+let worldX=0, speed=BASE_SPEED;
+let loveX=0, endSpawned=false;
+let gameState='intro'; // intro, playing, approach, handoff, ended
+let moveRight=false, moveLeft=false, touchRight=false, touchLeft=false;
+let paused=false;
+
+/* ================ UTILS & DESENHO ================ */
+const rand=(a,b)=>Math.random()*(b-a)+a;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function neonFill(c,blur=18){ctx.shadowColor=c;ctx.shadowBlur=blur;ctx.fillStyle=c;}
+function neonStroke(c,blur=18){ctx.shadowColor=c;ctx.shadowBlur=blur;ctx.strokeStyle=c;ctx.lineWidth=2;}
+
+function drawHeart(x,y,s,broken=true,color="#ff3b81"){
+  ctx.save(); ctx.translate(x,y); ctx.scale(s,s);
+  neonFill(color,24); ctx.globalAlpha=.18; ctx.beginPath(); ctx.arc(0,0,40,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1;
+  ctx.fillStyle=color; ctx.strokeStyle="#ffd1e1"; ctx.lineWidth=2;
+  const half=(side=1)=>{ctx.beginPath();ctx.moveTo(0,0);ctx.bezierCurveTo(0,-18,18*side,-18,18*side,-2);ctx.bezierCurveTo(18*side,10,0,14,0,26);ctx.bezierCurveTo(0,14,-18*side,10,-18*side,-2);ctx.bezierCurveTo(-18*side,-18,0,-18,0,0);ctx.closePath();};
+  if(broken){
+    ctx.save();ctx.translate(-7,0);half(1);ctx.fill();ctx.stroke();ctx.restore();
+    ctx.save();ctx.translate(7,0);half(-1);ctx.fill();ctx.stroke();ctx.restore();
+    neonStroke("#ffd1e1",10); ctx.beginPath(); ctx.moveTo(-4,-8); ctx.lineTo(0,0); ctx.lineTo(-2,6); ctx.lineTo(1,14); ctx.stroke();
+  }else{
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.bezierCurveTo(0,-22,22,-22,22,-4);
+    ctx.bezierCurveTo(22,12,0,18,0,34);
+    ctx.bezierCurveTo(0,18,-22,12,-22,-4);
+    ctx.bezierCurveTo(-22,-22,0,-22,0,0);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawPlayer(px,py,t,color="#ff3b81"){
+  const bob=Math.sin(t*0.02)*2;
+  ctx.save(); ctx.translate(px,py+bob);
+  neonFill(color,22); ctx.globalAlpha=.15; ctx.beginPath(); ctx.arc(0,-22,34,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1;
+  neonFill(color,18); ctx.beginPath(); ctx.arc(0,-22,12,0,Math.PI*2); ctx.fill();
+  neonStroke(color,14);
+  ctx.beginPath();
+  ctx.moveTo(0,-10); ctx.lineTo(0,14); ctx.lineTo(8,30);
+  ctx.moveTo(0,14); ctx.lineTo(-8,30);
+  ctx.moveTo(0,0); ctx.lineTo(10,-6);
+  ctx.moveTo(0,0); ctx.lineTo(-10,-4);
+  ctx.stroke();
+  ctx.restore();
+}
+function drawPlayerKneel(px, py, t, color="#ff3b81"){
+  ctx.save();
+  ctx.translate(px, py);
+  const bob = Math.sin(t*0.05)*1.2;
+  neonFill(color,22); ctx.globalAlpha=.12; ctx.beginPath(); ctx.arc(0, -18 + bob, 30, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha=1;
+  neonFill(color,18); ctx.beginPath(); ctx.arc(-4, -20 + bob, 11, 0, Math.PI*2); ctx.fill();
+  neonStroke(color,14);
+  ctx.beginPath();
+  ctx.moveTo(-2, -10); ctx.lineTo(-6, 8);
+  ctx.moveTo(-6, 8);  ctx.lineTo(-14, 24);
+  ctx.moveTo(-6, 8);  ctx.lineTo(6, 24);
+  ctx.moveTo(-4, -4); ctx.lineTo(-12, 6);
+  ctx.moveTo(-4, -4); ctx.lineTo(2, 6);
+  ctx.stroke();
+  neonFill("rgba(180,220,255,.7)",10); ctx.globalAlpha=.8;
+  ctx.fillRect(-12, -10 + bob, 2, 4);
+  ctx.fillRect(-10, -6 + bob, 2, 4);
+  ctx.globalAlpha=1;
+  ctx.restore();
+}
+function drawGhost(x,y,w,h,t){
+  ctx.save(); ctx.translate(x,y);
+  const wob=Math.sin((t+x)*0.02)*3;
+  neonFill("#00e5ff",12);
+  ctx.globalAlpha=.22; ctx.fillRect(-w/2,-h,w,h); ctx.globalAlpha=1;
+  neonStroke("#00e5ff",10); ctx.strokeRect(-w/2,-h,w,h);
+  ctx.beginPath(); ctx.arc(-w*.15,-h+14+wob,4,0,Math.PI*2); ctx.arc(w*.15,-h+16-wob,4,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+function drawLoveBlue(px,py,t){ drawPlayer(px,py,t,"#00e5ff"); }
+function drawTrashCan(x,y){
+  ctx.save(); ctx.translate(x,y);
+  neonStroke("#8ab6ff",12); neonFill("rgba(138,182,255,.12)",8);
+  ctx.fillRect(-18,-36,36,36); ctx.strokeRect(-18,-36,36,36);
+  ctx.beginPath(); ctx.moveTo(-22,-36); ctx.lineTo(22,-36); ctx.stroke();
+  ctx.restore();
+}
+
+/* ================ SPAWNS & INPUT ================ */
+function spawnHeart(){ hearts.push({x:W+60,y:groundY-rand(80,180),r:18,vy:rand(-.5,.5),phase:Math.random()*Math.PI*2}); }
+function spawnObst(){ const w=rand(28,40),h=rand(40,80); obst.push({x:W+60,y:groundY,w,h}); }
+function burst(x,y,color="#ff5b99"){ for(let i=0;i<14;i++) parts.push({x,y,vx:rand(-3,3),vy:rand(-4,1),life:rand(18,32),color}); }
+
+// teclado
+addEventListener('keydown',e=>{
+  if(e.code==='Space'||e.code==='ArrowUp'||e.code==='KeyW'){e.preventDefault();if(gameState==='intro')start();else if(gameState==='ended')reset();else jump();}
+  if(e.code==='ArrowRight'||e.code==='KeyD')moveRight=true;
+  if(e.code==='ArrowLeft'||e.code==='KeyA')moveLeft=true;
+  if(e.code==='KeyP'){ paused=!paused; }
+  if(e.code==='KeyR' && gameState!=='intro'){ window.__reset(); }
+});
+addEventListener('keyup',e=>{
+  if(e.code==='ArrowRight'||e.code==='KeyD')moveRight=false;
+  if(e.code==='ArrowLeft'||e.code==='KeyA')moveLeft=false;
+});
+
+// toque genérico
+addEventListener('pointerdown',(e)=>{
+  e.preventDefault();
+  if(gameState==='intro'){start();return;}
+  if(gameState==='ended'){reset();return;}
+  const x=e.clientX|| (e.touches && e.touches[0]?.clientX)||0;
+  if(gameState==='playing')jump();
+  if(gameState==='approach'){ if(x>W/2)touchRight=true; else touchLeft=true; }
+},{ passive:false });
+addEventListener('pointerup',(e)=>{ e.preventDefault(); touchRight=false; touchLeft=false; },{ passive:false });
+
+// botões touch dedicados
+const btnLeft = document.getElementById('btnLeft');
+const btnRight= document.getElementById('btnRight');
+const btnJump = document.getElementById('btnJump');
+const setHold = (el, fnDown, fnUp) => {
+  const down = (e)=>{ e.preventDefault(); fnDown(); };
+  const up   = (e)=>{ e.preventDefault(); fnUp();   };
+  el.addEventListener('pointerdown', down, { passive:false });
+  el.addEventListener('pointerup',   up,   { passive:false });
+  el.addEventListener('pointerleave',up,   { passive:false });
+  el.addEventListener('touchstart',  down, { passive:false });
+  el.addEventListener('touchend',    up,   { passive:false });
+};
+setHold(btnLeft,  ()=>{moveLeft=true;},  ()=>{moveLeft=false;});
+setHold(btnRight, ()=>{moveRight=true;}, ()=>{moveRight=false;});
+setHold(btnJump,  ()=>{jump();}, ()=>{});
+
+/* ================ FLUXO ================ */
+function jump(){
+  if(player.onGround&&(gameState==='playing'||gameState==='approach')){
+    player.vy=JUMP_VY; player.onGround=false;
+    try{ sPulo.currentTime=0; sPulo.play().catch(()=>{});}catch(_){}
+  }
+}
+const introText=["Ela corre…","…sem saber se alguém ainda espera no fim da estrada.","Recolha os corações. Evite as sombras."];
+let introIdx=0;
+
+function start(){
+  if(!audioReady){ unlockAudio(); }
+  paused=false;
+  gameState='playing';
+  overlay.innerHTML='';
+}
+function reset(){
+  try{musica.pause();}catch(_){}
+  musica.currentTime=0;
+
+  gameState='intro'; overlay.innerHTML='';
+  frames=0; worldX=0; speed=BASE_SPEED;
+  collected=0; endSpawned=false; loveX=0;
+  hearts.length=0; obst.length=0; parts.length=0;
+  player.x=200; player.y=groundY-player.h; player.vy=0; player.onGround=true;
+  moveRight=moveLeft=touchRight=touchLeft=false;
+  handoff = { phase:0,timer:0,heart:{x:0,y:0},trashX:0,blueX:0, otherX:null, kneel:false };
+}
+
+/* ================ FINAL CONTROLADO ================ */
+function startApproach(){
+  gameState='approach';
+  speed=0; hearts.length=0; obst.length=0;
+  const margin=260;
+  loveX=W - margin;
+  handoff.trashX = loveX + 90;
+  handoff.blueX = loveX;
+}
+let handoff = {
+  phase: 0, timer: 0,
+  heart: { x: 0, y: 0 },
+  trashX: 0, blueX: 0,
+  otherX: null, kneel: false
+};
+function startHandoff(){
+  gameState='handoff';
+  handoff.phase=0; handoff.timer=0;
+  handoff.heart.x = player.x+10;
+  handoff.heart.y = player.y-28;
+  handoff.kneel = false;
+  handoff.otherX = null;
+}
+
+/* ================ COLISÃO ================ */
+function rectCir(px,py,pw,ph,cx,cy,cr){
+  const cx2=clamp(cx,px,px+pw), cy2=clamp(cy,py,py+ph);
+  const dx=cx-cx2, dy=cy-cy2; return (dx*dx+dy*dy)<=cr*cr;
+}
+function rectRect(a,b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y && (a.y-a.h) < b.y; }
+
+/* ================ UPDATE/DRAW/LOOP ================ */
+player.y=groundY-player.h; player.onGround=true;
+
+function update(t){
+  frames++;
+
+  if(paused){ return; }
+
+  // chuva
+  for(const d of rain){ d.y+=d.v; d.x+=.6; if(d.y>H){d.y=-d.len; d.x=Math.random()*W;} if(d.x>W) d.x=0; }
+
+  if(gameState==='intro'){ if(frames%120===0) introIdx++; }
+
+  if(gameState==='playing'){
+    worldX+=speed;
+    player.vy+=GRAVITY; player.y+=player.vy;
+    if(player.y>groundY){player.y=groundY; player.onGround=true; player.vy=0;}
+
+    if(frames % Math.max(28, HEART_RATE - Math.floor(collected/2))===0) spawnHeart();
+    if(frames % OBST_RATE===0) spawnObst();
+
+    for(let i=hearts.length-1;i>=0;i--){
+      const h=hearts[i]; h.x-=BASE_SPEED; h.y+=Math.sin((h.phase+=.08))*.6 + h.vy;
+      if(rectCir(player.x-14,player.y-player.h,28,player.h,h.x,h.y,h.r)){
+        hearts.splice(i,1); collected++; burst(player.x,player.y-28,"#ff5b99");
+        try{ sHeart.currentTime=0; sHeart.play().catch(()=>{});}catch(_){}
+      } else if(h.x<-60) hearts.splice(i,1);
+    }
+    for(let i=obst.length-1;i>=0;i--){
+      const o=obst[i]; o.x-=BASE_SPEED;
+      if(rectRect({x:player.x-14,y:player.y,w:28,h:player.h},o)){
+        const lost=Math.min(3,collected); collected-=lost; burst(player.x,player.y-24,"#00e5ff"); obst.splice(i,1);
+      } else if(o.x<-80) obst.splice(i,1);
+    }
+
+    if(!endSpawned && collected>=TARGET_HEARTS){
+      endSpawned=true; loveX=W+1000;
+      musica.volume = 0.8; // clímax
+    }
+    if(endSpawned){
+      loveX -= BASE_SPEED;
+      if(loveX <= W-260){ startApproach(); }
+    }
+  }
+
+  if(gameState==='approach'){
+    player.vy+=GRAVITY; player.y+=player.vy;
+    if(player.y>groundY){player.y=groundY; player.onGround=true; player.vy=0;}
+    const walk = (moveRight||touchRight) ? 3.2 : (moveLeft||touchLeft ? -2.2 : 0);
+    player.x = clamp(player.x + walk, 80, W-80);
+    if(Math.abs(player.x - loveX) < 44 && player.onGround){
+      player.x = loveX - 40;
+      startHandoff();
+    }
+  }
+
+  if(gameState==='handoff'){
+    handoff.timer++;
+
+    // 0: ROSA -> coração -> AZUL
+    if(handoff.phase===0){
+      const ox=player.x+8, oy=player.y-30;
+      const dx=handoff.blueX-2, dy=groundY-36;
+      const p = Math.min(1, handoff.timer/45);
+      handoff.heart.x = ox + (dx-ox)*p;
+      handoff.heart.y = oy + (dy-oy)*p;
+      if(p>=1){ handoff.phase=1; handoff.timer=0; }
+    }
+    // 1: AZUL joga na lixeira
+    else if(handoff.phase===1){
+      const sx=handoff.blueX-2, sy=groundY-36;
+      const tx=handoff.trashX,  ty=groundY-40;
+      const p = Math.min(1, handoff.timer/38);
+      const q = p;
+      handoff.heart.x = sx + (tx-sx)*q;
+      const arc = -50*Math.sin(q*Math.PI);
+      handoff.heart.y = sy + (ty-sy)*q + arc;
+      if(p>=1){ handoff.phase=2; handoff.timer=0; }
+    }
+    // 2: coração some; AZUL vai embora; ROSA ajoelha
+    else if(handoff.phase===2){
+      handoff.heart.y += 2.8;
+      handoff.blueX += 1.8;
+      if(!handoff.kneel){ handoff.kneel = true; }
+      if(handoff.timer>50){
+        handoff.phase = 3;
+        handoff.timer = 0;
+        handoff.otherX = W + 80; // novo rosa surge da direita
+      }
+    }
+    // 3: OUTRO ROSA entra da direita; AZUL quase para
+    else if(handoff.phase===3){
+      handoff.otherX -= 2.3;
+      if(handoff.timer<40){ handoff.blueX += 0.8; }
+      if(handoff.otherX <= handoff.blueX + 46){
+        handoff.phase = 4;
+        handoff.timer = 0;
+        handoff.heart.x = handoff.blueX - 2;
+        handoff.heart.y = groundY - 36;
+      }
+    }
+    // 4: AZUL entrega um NOVO coração ao OUTRO ROSA
+    else if(handoff.phase===4){
+      const sx = handoff.blueX - 2, sy = groundY - 36;
+      const tx = handoff.otherX - 8, ty = groundY - 34;
+      const p = Math.min(1, handoff.timer/48);
+      handoff.heart.x = sx + (tx - sx) * p;
+      handoff.heart.y = sy + (ty - sy) * p;
+      if(p>=1 && handoff.timer>70){ handoff.phase = 5; handoff.timer = 0; }
+    }
+    // 5: fim
+    else if(handoff.phase===5){
+      if(handoff.timer>60){ finish(); }
+    }
+  }
+
+  // partículas
+  for(let i=parts.length-1;i>=0;i--){
+    const p=parts[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=.12; p.life-=1; if(p.life<=0) parts.splice(i,1);
+  }
+
+  // HUD
+  hud.innerHTML = `💔 Corações: <b>${collected}</b> / ${TARGET_HEARTS} &nbsp;•&nbsp; ⭐ Recorde: <b>${Math.max(best,collected)}</b> ${paused ? ' • ⏸️' : ''}`;
+}
+
+function finish(){
+  gameState='ended';
+  best=Math.max(best,collected);
+  localStorage.setItem('hr_best', String(best));
+  overlay.innerHTML = `
+    <div>
+      <h2 style="margin:0 0 8px 0;font-weight:900;text-shadow:0 0 22px rgba(255,59,129,.8)">
+        Fim.
+      </h2>
+      <p style="opacity:.95">Nem todo coração entregue é recebido. E, às vezes, outro aparece para receber.</p>
+      <p style="margin-top:8px">Corações coletados: <b>${collected}</b> • Recorde: <b>${best}</b></p>
+      <a class="btn" href="#" onclick="window.__reset();return false;">Jogar de novo</a>
+      <div class="small">by <b>Eduarda Silva Games</b> — PC: Espaço/←/→ • P: Pausar • R: Reiniciar</div>
+    </div>
+  `;
+}
+
+function draw(t){
+  // fundo
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"#0a0b18"); g.addColorStop(.5,"#0a0b12"); g.addColorStop(1,"#07080f");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  // cidade
+  ctx.save(); ctx.globalAlpha=.22; ctx.fillStyle="#0f1320";
+  const seed=Math.floor(worldX*.2);
+  for(let i=0;i<24;i++){ const x=(i*120-(worldX*.5)%120); const h=60+((i*37+seed)%90); ctx.fillRect(x, groundY-140-h, 60, h); }
+  ctx.restore();
+
+  // chuva
+  ctx.save(); ctx.strokeStyle="rgba(180,220,255,.38)"; ctx.lineWidth=1; ctx.beginPath();
+  for(const d of rain){ ctx.moveTo(d.x,d.y); ctx.lineTo(d.x-2,d.y-d.len); }
+  ctx.stroke(); ctx.restore();
+
+  // chão
+  neonStroke("#00e5ff",18); ctx.beginPath(); ctx.moveTo(0,groundY+2); ctx.lineTo(W,groundY+2); ctx.stroke();
+
+  // entidades
+  for(const h of hearts) drawHeart(h.x,h.y,1,true);
+  for(const o of obst) drawGhost(o.x,o.y,o.w,o.h,t);
+
+  // final: azul e lixeira
+  if(gameState==='approach' || gameState==='handoff' || gameState==='ended'){
+    drawLoveBlue(handoff.blueX||loveX, groundY, t);
+    drawTrashCan(handoff.trashX|| (loveX+90), groundY);
+  }
+
+  // player: ajoelhado a partir da fase 2 do handoff
+  if (gameState==='handoff' && handoff.kneel) {
+    drawPlayerKneel(player.x, player.y, t, "#ff3b81");
+  } else {
+    drawPlayer(player.x, player.y, t, "#ff3b81");
+  }
+
+  // "outro rosa" (entra da direita nas fases 3+)
+  if (gameState==='handoff' && handoff.otherX !== null) {
+    drawPlayer(handoff.otherX, groundY, t, "#ff3b81");
+  }
+
+  // coração sendo passado/lançado nas fases do final
+  if(gameState==='handoff'){
+    drawHeart(handoff.heart.x, handoff.heart.y, 0.9, false, "#ff3b81");
+  }
+
+  // overlays
+  if(gameState==='intro'){
+    overlay.innerHTML = `
+      <div>
+        <h2 style="margin:0 0 8px 0;font-weight:800;text-shadow:0 0 16px rgba(255,59,129,.6)">
+          HeartRunner – Corrida por um Amor Perdido
+        </h2>
+        <p style="margin:6px 0 0 0;opacity:.9">${introText[introIdx%introText.length]}</p>
+        <a class="btn" href="#" onclick="window.__start();return false;">Começar</a>
+        <div class="small">PC: Espaço pular, ←/→ andar • Celular: botões • Colete <b>${TARGET_HEARTS}</b> corações • P: Pausar • R: Reiniciar</div>
+      </div>
+    `;
+  } else if (paused){
+    overlay.innerHTML = `
+      <div>
+        <h2 style="margin:0 0 8px 0;font-weight:900;text-shadow:0 0 22px rgba(255,59,129,.8)">⏸️ Pausado</h2>
+        <div class="small">Pressione <b>P</b> para continuar</div>
+      </div>
+    `;
+  } else if (gameState!=='ended'){
+    overlay.innerHTML = '';
+  }
+}
+
+function loop(t){ update(t); draw(t); requestAnimationFrame(loop); }
+window.__start = start;
+window.__reset = reset;
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
